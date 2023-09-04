@@ -1,0 +1,6 @@
+org_id             = "123456785638"
+billing_account    = "01234-ABCD-56789"
+project_name       = "ai-slackbot"
+folder_id          = "0123456789"
+cloudbuild_viewers = ["group:gcp-organization-admins@somecompany.com"]
+cloudbuild_editors = ["group:gcp-organization-admins@somecompany.com"]

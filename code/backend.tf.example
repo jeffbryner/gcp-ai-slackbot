@@ -1,0 +1,6 @@
+terraform {
+  backend "gcs" {
+    bucket = "UPDATE_ME_WITH_OUTPUT_OF_INITIAL_INIT"
+    prefix = "code"
+  }
+}

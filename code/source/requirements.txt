@@ -1,0 +1,10 @@
+Flask>1
+slack_bolt
+requests
+gunicorn
+google-crc32c
+google-cloud-secret-manager
+google-cloud-pubsub
+google-auth
+google-api-python-client
+google-cloud-aiplatform
