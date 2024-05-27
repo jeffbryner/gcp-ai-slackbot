@@ -15,6 +15,12 @@ Slackbots are great! Serverless environments like Lambda and GCP Cloud run is gr
 
 Seriously though, I wanted an easy way to link the VertexAI chat models with the readily avaiable chat interface known as slack.
 
+If you prompt for the ai (say hey ai, or howdy ai or hello ai) it'll start a thread and answer anything you ask in the thread. 
+
+If you use the /summarize slack command and give it a number of hours "/summarize the last 3 hours" it'll look back in the channel and summarize any messages and threads for that time. 
+
+
+
 ## Concept of operations
 The desired end state is a 
   - GCP project 
@@ -137,9 +143,24 @@ Subscribe to these events:
 - message.mpim
 - app_mention
 
-And at least these scopes: 
+And at least these scopes to allow it to join channels, convert userids to names and DM folks if it fails: 
 - chat:write
 - im:history
+- app_mentions:read
+- channels:history
+- channels:join
+- channels:read
+- commands
+- groups:history
+- groups:read
+- groups:write
+- im:write
+- mpim:history
+- mpim:write
+- users.profile:read
+- users:read
+
+Don't forget to setup the /summarize command in the app config! It will join public channels when asked to summarize them. It can't join private channels on it's own but will warn the user if it fails to join and can be invited manually. 
 
 
 
