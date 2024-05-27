@@ -17,7 +17,12 @@ Seriously though, I wanted an easy way to link the VertexAI chat models with the
 
 If you prompt for the ai (say hey ai, or howdy ai or hello ai) it'll start a thread and answer anything you ask in the thread. 
 
+![gemini thread](./gemini-thread.png)
+
+
 If you use the /summarize slack command and give it a number of hours "/summarize the last 3 hours" it'll look back in the channel and summarize any messages and threads for that time. 
+
+![channel summary](./summary.png)
 
 
 
