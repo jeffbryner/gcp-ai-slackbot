@@ -1,6 +1,7 @@
 import logging
 from google.cloud import secretmanager
 import google_crc32c
+from slack_sdk.errors import SlackApiError
 
 
 logging.basicConfig(level=logging.DEBUG)
@@ -40,3 +41,65 @@ def getValueByPath(input_dict, path_string):
     for chunk in path_string.split("."):
         return_data = return_data.get(chunk, {})
     return return_data
+
+
+def get_channel_messages(slack_client, channel_id, message_count=0, oldest=1):
+    # return conversation history
+    conversation_history = []
+
+    try:
+        # Call the conversations.history method using the WebClient
+        # conversations.history returns the first 100 messages by default
+        # paginated, get the first page
+        result = slack_client.conversations_history(
+            channel=channel_id, limit=message_count, oldest=oldest
+        )
+        conversation_history = result["messages"] if "messages" in result else []
+        while getValueByPath(result, "result.response_metadata.next_cursor"):
+            logger.debug(
+                f"CURSOR: {getValueByPath(result,'result.response_metadata.next_cursor')}"
+            )
+            result = slack_client.conversations_history(
+                channel=channel_id,
+                limit=message_count,
+                cursor=result["response_metadata"]["next_cursor"],
+                latest=result["messages"][1]["ts"],
+            )
+            conversation_history.extend(result["messages"])
+
+        # results
+        logger.debug(
+            "{} messages found in {}".format(len(conversation_history), channel_id)
+        )
+        return conversation_history
+
+    except SlackApiError as e:
+        logger.error("Error accessing history: {}".format(e))
+
+
+def get_message_thread(slack_client, channel_id, thread_ts):
+    thread_history = []
+    try:
+        # Call the conversations.replies method using the WebClient
+        # conversations.history returns the first 100 messages by default
+        # paginated, get the first page
+        result = slack_client.conversations_replies(channel=channel_id, ts=thread_ts)
+        thread_history = result["messages"] if "messages" in result else []
+        while getValueByPath(result, "result.response_metadata.next_cursor"):
+            logger.debug(
+                f"CURSOR: {getValueByPath(result,'result.response_metadata.next_cursor')}"
+            )
+            result = slack_client.conversations_replies(
+                channel=channel_id,
+                ts=thread_ts,
+                cursor=result["response_metadata"]["next_cursor"],
+                latest=result["messages"][1]["ts"],
+            )
+            thread_history.extend(result["messages"])
+
+        # results
+        logger.debug("{} messages found in {}".format(len(thread_history), thread_ts))
+        return thread_history
+
+    except SlackApiError as e:
+        logger.error("Error accessing history: {}".format(e))
