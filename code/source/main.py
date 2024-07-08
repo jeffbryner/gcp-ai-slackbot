@@ -2,6 +2,7 @@ import logging
 import base64
 import os
 import json
+import requests
 from slack_bolt import App
 from slack_sdk.errors import SlackApiError
 
@@ -16,7 +17,7 @@ from fastnumbers import try_float
 
 
 # from vertexai.language_models import TextGenerationModel
-from vertexai.generative_models import GenerativeModel
+from vertexai.generative_models import GenerativeModel, Part, Content
 
 
 # Flask adapter
@@ -33,15 +34,17 @@ PROJECT_ID = os.environ.get("PROJECT_ID", "")
 PROJECT_ID = PROJECT_ID.replace("projects/", "")
 
 
+# we may use the slack_token later for file retrieval
+slack_token = get_secret(
+    PROJECT_ID, os.environ.get("SLACK_BOT_TOKEN_NAME", "slack_bot_token")
+)
 # initialize slack
 # process_before_response must be True when running on cloud functions, must be false for cloud run
 # no ssl check needed, no way to deploy cloud run without it
 slack_app = App(
     process_before_response=False,
     ssl_check_enabled=False,
-    token=get_secret(
-        PROJECT_ID, os.environ.get("SLACK_BOT_TOKEN_NAME", "slack_bot_token")
-    ),
+    token=slack_token,
     signing_secret=get_secret(
         PROJECT_ID, os.environ.get("SLACK_SIGNING_SECRET_NAME", "slack_signing_secret")
     ),
@@ -73,9 +76,8 @@ def send_pubsub_message(message):
 def handle_slack_message(message):
     logger.debug(f"handle_slack_message received: {message}")
     try:
-        # init vertexAI
+        # init vertexAI wth gemini
         vertexai.init(project=PROJECT_ID, location="us-central1")
-        # generation_model = TextGenerationModel.from_pretrained("text-bison")
         generation_model = GenerativeModel("gemini-1.5-pro")
         generation_config = {
             "temperature": 1,
@@ -128,12 +130,87 @@ def handle_slack_message(message):
             else:
                 logger.debug("THIS ISN'T A THREAD FOR US")
             if reply_with_ai:
+                # get the thread history to send to the ai as context
+                thread_history = get_message_thread(
+                    slack_client=slack_client,
+                    channel_id=message["channel"],
+                    thread_ts=message["thread_ts"],
+                )
+
                 prompt = f"You are a slack bot in a thread with a person. Please respond kindly to this prompt using slack markdown formatting: \n {message['text']}"
                 # vertext_response = generation_model.predict(
                 #     prompt=prompt, temperature=1, max_output_tokens=2048
                 # )
+                # create the ai chat history for gemini
+                # ensuring that multiturn requests alternate between user and model.
+                # adding 'parts' if multiple messages are from either a user or a model
+                # accounting for any files uploaded to the thread
+
+                thread_messages = []
+                for thread_message in thread_history:
+                    role = "user"
+                    if "bot_id" in thread_message:
+                        role = "model"
+                    # was the last message the same role? Append a new part
+                    if (
+                        thread_messages
+                        and thread_messages[(len(thread_messages) - 1)].role == role
+                    ):
+                        # append this as another part
+                        # the native objects in Content are read only, so we serialize to manipulate
+                        d_message = thread_messages[len(thread_messages) - 1].to_dict()
+                        if thread_message["text"]:
+                            d_message["parts"].append({"text": thread_message["text"]})
+
+                        # files?
+                        if "files" in thread_message:
+                            for thread_file in thread_message["files"]:
+                                r = requests.get(
+                                    thread_file["url_private"],
+                                    headers={
+                                        "Authorization": "Bearer %s" % slack_token
+                                    },
+                                )
+                                file_data = r.content  # get binary content
+                                file_part = Part.from_data(
+                                    file_data, thread_file["mimetype"]
+                                ).to_dict()
+                                d_message["parts"].append(file_part)
+                        thread_messages[len(thread_messages) - 1] = Content.from_dict(
+                            d_message
+                        )
+
+                    else:
+                        # make a new turn in the chat
+                        # we can make and append parts since this is new Content and not read only
+                        chat_parts = []
+                        # text?
+                        if thread_message["text"]:
+                            chat_parts.append(Part.from_text(thread_message["text"]))
+                        # files?
+                        if "files" in thread_message:
+                            for thread_file in thread_message["files"]:
+                                r = requests.get(
+                                    thread_file["url_private"],
+                                    headers={
+                                        "Authorization": "Bearer %s" % slack_token
+                                    },
+                                )
+                                file_data = r.content  # get binary content
+                                chat_parts.append(
+                                    Part.from_data(file_data, thread_file["mimetype"])
+                                )
+
+                        thread_messages.append(
+                            Content(
+                                role=role,
+                                parts=chat_parts,
+                            )
+                        )
+                logger.debug(thread_messages)
+
                 vertext_response = generation_model.generate_content(
-                    contents=prompt, generation_config=generation_config
+                    contents=thread_messages, generation_config=generation_config
                 )
                 logger.debug(f"vertext response: {vertext_response}")
                 ai_response = vertext_response.text
@@ -153,8 +230,88 @@ def handle_slack_message(message):
                     thread_ts=message["ts"],
                 )
                 logger.debug(slack_result)
+            return
 
-        if message["entrypoint"] == "summarize_request":
+        if message["entrypoint"] == "summarize_thread_request":
+            # someone in a thread asked for a summary of the thread
+            logger.debug(message)
+            # we get the message reacted to, not the thread
+            # figure out the thread ts
+            slack_result = slack_client.conversations_replies(
+                channel=message["channel"], ts=message["ts"]
+            )
+            logger.debug("MESSAGE IN CONTEXT OF THREAD")
+            logger.debug(slack_result)
+            thread_messages = []
+            thread_ts = None
+            if "messages" in slack_result:
+                # now we get the thread ts
+                thread_ts = slack_result["messages"][0]["thread_ts"]
+                # get the thread messages
+                thread_messages = get_message_thread(
+                    slack_client,
+                    channel_id=message["channel"],
+                    thread_ts=thread_ts,
+                )
+            # anything to summarize?
+            if not len(thread_messages):
+                slack_client.chat_postEphemeral(
+                    channel=message["channel"],
+                    user=message["user"],
+                    text="Sorry, doesn't appear to be any messages to summarize",
+                )
+                return
+
+            sorted_history = sorted(thread_messages, key=itemgetter("ts"))
+            # format thread for ai
+            channel_conversation = ""
+            # cache of user id to name
+            slack_users = {}
+            for slack_message in sorted_history:
+                # resolve user ids if we don't already know them
+                slack_user_id = slack_message["user"]
+                user_name = ""
+                if slack_user_id not in slack_users:
+                    user_result = slack_client.users_info(user=slack_message["user"])
+                    user_name = user_result["user"]["profile"]["real_name"]
+                    slack_users[slack_user_id] = user_name
+                else:
+                    user_name = slack_users[slack_user_id]
+                channel_conversation += f"{user_name}: {slack_message['text']}\n"
+
+            # Prompt the AI
+            logger.debug(f"CONVERSATION PROMPT: {channel_conversation}")
+            prompt = f"You are a slackbot and have been asked to summarize the following conversation:\n {channel_conversation}"
+            vertext_response = generation_model.generate_content(
+                contents=prompt, generation_config=generation_config
+            )
+            logger.debug(f"vertext response: {vertext_response}")
+            ai_response = vertext_response.text
+            if not ai_response:
+                ai_response = "Hrm.. dunno how to respond"
+
+            blocks = [
+                {
+                    "type": "section",
+                    "text": {
+                        "type": "mrkdwn",
+                        "text": slack_markdown(
+                            f"Summary of the thread:\n {ai_response}"
+                        ),
+                    },
+                }
+            ]
+
+            # return result as an ephemeral message
+            slack_result = slack_client.chat_postEphemeral(
+                channel=message["channel"],
+                user=message["user"],
+                thread_ts=thread_ts,
+                blocks=blocks,
+            )
+            return
+
+        if message["entrypoint"] == "summarize_channel_request":
             # we've been asked to summarize a channel
             try:
                 slack_result = slack_client.conversations_info(
@@ -282,6 +439,7 @@ def handle_slack_message(message):
             slack_result = slack_client.chat_postEphemeral(
                 channel=message["channel_id"], user=message["user_id"], blocks=blocks
             )
+            return
 
     except Exception as e:
         logger.error(f"Error posting message: {e}")
@@ -316,12 +474,36 @@ slack_app.event("message")(ack=ack_message, lazy=[thread_reply])
 
 def summarize(ack, command, respond):
     logger.debug(command)
-    command["entrypoint"] = "summarize_request"
+    command["entrypoint"] = "summarize_channel_request"
     send_pubsub_message(command)
     respond("")
 
 
 slack_app.command("/summarize")(ack=ack_message, lazy=[summarize])
+
+
+def reaction_handler(event, client, say, context):
+    logger.info(event)
+
+    # we trigger on any emoji named summary, summarize, etc
+    if "summar" not in event["reaction"]:
+        # early exit
+        return
+
+    logger.info("summarize emoji request")
+
+    # start with the event
+    # type: reaction_added, user: slack userid, reaction: emoji name, item_user, event_ts, item (type, channel, ts)
+    message = event
+    channel = event["item"]["channel"]
+    message["channel"] = channel
+    message["ts"] = event["item"]["ts"]
+    message["entrypoint"] = "summarize_thread_request"
+    # send to pubsub, do the rest async
+    send_pubsub_message(message=message)
+
+
+slack_app.event("reaction_added")(ack=ack_message, lazy=[reaction_handler])
 
 flask_app = Flask(__name__)
 

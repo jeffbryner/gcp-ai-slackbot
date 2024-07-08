@@ -55,10 +55,8 @@ def get_channel_messages(slack_client, channel_id, message_count=0, oldest=1):
             channel=channel_id, limit=message_count, oldest=oldest
         )
         conversation_history = result["messages"] if "messages" in result else []
-        while getValueByPath(result, "result.response_metadata.next_cursor"):
-            logger.debug(
-                f"CURSOR: {getValueByPath(result,'result.response_metadata.next_cursor')}"
-            )
+        while result.data["has_more"]:
+
             result = slack_client.conversations_history(
                 channel=channel_id,
                 limit=message_count,
@@ -85,10 +83,8 @@ def get_message_thread(slack_client, channel_id, thread_ts):
         # paginated, get the first page
         result = slack_client.conversations_replies(channel=channel_id, ts=thread_ts)
         thread_history = result["messages"] if "messages" in result else []
-        while getValueByPath(result, "result.response_metadata.next_cursor"):
-            logger.debug(
-                f"CURSOR: {getValueByPath(result,'result.response_metadata.next_cursor')}"
-            )
+        while result.data["has_more"]:
+
             result = slack_client.conversations_replies(
                 channel=channel_id,
                 ts=thread_ts,
